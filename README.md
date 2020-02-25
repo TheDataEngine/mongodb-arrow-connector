@@ -2,6 +2,8 @@
 
 A Rust library for Arrow IO from and to MongoDB.
 
+Licensed under the Apache 2.0 license.
+
 ## Motivation
 
 We are curently writing this library due to a need to read MongoDB data into dataframes.
