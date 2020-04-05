@@ -8,4 +8,5 @@ edition = "2018"
 bson = { version = "0.14", features = ["decimal128"] }
 mongodb = { git = "https://github.com/nevi-me/mongo-rust-driver", branch = "decimal-128-hack" }
 arrow = "0.16.0"
-# mongodb-schema-parser = { git = "https://github.com/nevi-me/mongodb-schema-parser", branch = "update-bson" }
+mongodb-schema-parser = { git = "https://github.com/nevi-me/mongodb-schema-parser", branch = "write-bson", default-features = false }
+chrono = "0.4"
