@@ -11,28 +11,49 @@ use mongodb::{
     Client,
 };
 
+/// Configuration for the MongoDB writer
 pub struct WriterConfig<'a> {
+    /// The hostname to connect to
     pub hostname: &'a str,
+    /// An optional port, defaults to 27017
     pub port: Option<u16>,
+    /// The name of the database to write to
     pub database: &'a str,
+    /// The name of the collection to write to
     pub collection: &'a str,
+    /// The write mode, whether an existing collection should
+    ///  be appended to or overwritten
     pub write_mode: WriteMode,
+    /// Whether compatible types should be coerced, for example
+    ///  an Int8 type will be written to an Int32 as BSON doesn't have Int8
     pub coerce_types: bool,
 }
 
+/// The mode to write to the collection in
 pub enum WriteMode {
+    /// Do not drop collection, but append to an existing collection.
+    /// If the collection does not exist, a new one is created.
     Append,
+    /// Try to drop the collection if it exists.
+    /// MongoDB returns an error if a collection that does not exist
+    ///  is dropped. We log this to the console, but do not return an error.
     Overwrite,
 }
 
+/// Database writer
 pub struct Writer {
+    /// The MongoDB client, with a connection established
     client: Client,
+    /// The name of the database to write to
     database: String,
+    /// The name of the collection to write to
     collection: String,
+    /// The schema of the data to write
     schema: Schema,
 }
 
 impl Writer {
+    /// Try to create a new writer, with provided writer options and a schema
     pub fn try_new(config: &WriterConfig, schema: Schema) -> Result<Self, ()> {
         // check if data types can be written
         Writer::check_supported_schema(schema.fields(), config.coerce_types)?;
@@ -63,6 +84,7 @@ impl Writer {
         })
     }
 
+    /// Write a batch to the database
     pub fn write(&self, batch: &RecordBatch) -> Result<(), ()> {
         if batch.schema().as_ref() != &self.schema {
             eprintln!("Schema of record batch does not match writer");
@@ -140,6 +162,7 @@ impl Writer {
     }
 }
 
+/// A private struct that uses a newtype pattern, holds the documents to be written
 struct Documents(Vec<bson::Document>);
 
 impl From<&RecordBatch> for Documents {

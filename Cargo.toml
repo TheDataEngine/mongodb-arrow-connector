@@ -5,8 +5,7 @@ authors = ["Neville Dipale <nevilledips@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-bson = { version = "0.14", features = ["decimal128"] }
-mongodb = { git = "https://github.com/nevi-me/mongo-rust-driver", branch = "decimal-128-hack" }
+bson = "0.14"
+mongodb = "0.9.2"
 arrow = "0.16.0"
-mongodb-schema-parser = { git = "https://github.com/nevi-me/mongodb-schema-parser", branch = "write-bson", default-features = false }
 chrono = "0.4"

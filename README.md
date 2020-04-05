@@ -11,6 +11,7 @@ We are curently writing this library due to a need to read MongoDB data into dat
 ## Features
 
 - [X] Read from a collection to batches
+- [X] Write from batches to a collection
 - [ ] Infer collection schema
 - [ ] Projection predicate push-down
 - [ ] Data types

@@ -10,22 +10,35 @@ use mongodb::{
     options::{AggregateOptions, ClientOptions, StreamAddress},
     Client,
 };
-// use mongodb_schema_parser::SchemaParser;
 
+/// Configuration for the MongoDB reader
 pub struct ReaderConfig<'a> {
+    /// The hostname to connect to
     pub hostname: &'a str,
+    /// An optional port, defaults to 27017
     pub port: Option<u16>,
-    // read_preference,
+    /// The name of the database to read from
     pub database: &'a str,
+    /// The name of the collection to read from
     pub collection: &'a str,
 }
 
+/// Database reader
 pub struct Reader {
+    /// The MongoDB client, with a connection established
     client: Client,
+    /// The name of the database to read from
     database: String,
+    /// The name of the collection to read from
     collection: String,
+    /// The schema of the data to read
     schema: Schema,
+    /// An internal tracker of the current index that has been read
     current_index: usize,
+    /// The preferred batch size per document.
+    /// If the documents being read are fairly small, or can fit in memory,
+    ///   a larger batch size is more performant as it would result in
+    ///   less roundtrips to the database.
     batch_size: usize,
 }
 
