@@ -251,7 +251,7 @@ mod tests {
         let config = ReaderConfig {
             hostname: "localhost",
             port: None,
-            database: "transitdb",
+            database: "mycollection",
             collection: "delays_",
         };
         let mut reader = Reader::try_new(&config, schema)?;

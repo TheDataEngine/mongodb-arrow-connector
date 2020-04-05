@@ -319,14 +319,14 @@ mod tests {
         let reader_config = ReaderConfig {
             hostname: "localhost",
             port: None,
-            database: "transitdb",
+            database: "mycollection",
             collection: "delays_",
         };
         let mut reader = Reader::try_new(&reader_config, schema.clone())?;
         let writer_config = WriterConfig {
             hostname: "localhost",
             port: None,
-            database: "transitdb",
+            database: "mycollection",
             collection: "delays_2",
             write_mode: WriteMode::Overwrite,
             coerce_types: true,
