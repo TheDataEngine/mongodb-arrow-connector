@@ -4,7 +4,7 @@
 //! This crate allows reading and writing MongoDB data in the Apache Arrow format.
 //! Data is read as `RecordBatch`es from a MongoDB database using the aggregation
 //! framework.
-//! Arrow `RecordBatch`es are written to MongoDB using an insert_many into a collection.
+//! Apache Arrow `RecordBatch`es are written to MongoDB using an insert_many into a collection.
 
 /// MongoDB reader
 pub mod reader;

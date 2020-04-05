@@ -1,6 +1,6 @@
-# MongoDB Arrow Connector
+# MongoDB Apache Arrow Connector
 
-A Rust library for Arrow IO from and to MongoDB.
+A Rust library for reading and writing Apache Arrow batches from and to MongoDB.
 
 Licensed under the Apache 2.0 license.
 

@@ -104,7 +104,7 @@ impl Writer {
             })
     }
 
-    /// MongoDB supports a subset of Arrow supported types, check if schema can be written
+    /// MongoDB supports a subset of Apache Arrow supported types, check if schema can be written
     fn check_supported_schema(fields: &Vec<Field>, coerce_types: bool) -> Result<(), ()> {
         for field in fields {
             let t = field.data_type();
