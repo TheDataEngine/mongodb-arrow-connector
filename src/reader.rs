@@ -6,10 +6,8 @@ use arrow::{
     record_batch::{RecordBatch, RecordBatchReader},
 };
 use bson::{doc, Bson};
-use mongodb::{
-    options::{AggregateOptions, ClientOptions, StreamAddress},
-    Client,
-};
+use mongodb::options::{AggregateOptions, ClientOptions, StreamAddress};
+use mongodb::sync::Client;
 
 /// Configuration for the MongoDB reader
 pub struct ReaderConfig<'a> {
@@ -74,11 +72,11 @@ impl Reader {
     }
 
     /// Read the next record batch
-    pub fn next(&mut self) -> Result<Option<RecordBatch>, ()> {
+    pub fn next_batch(&mut self) -> Result<Option<RecordBatch>, ()> {
         let mut criteria = doc! {};
         let mut project = doc! {};
         for field in self.schema.fields() {
-            project.insert(field.name(), bson::Bson::I32(1));
+            project.insert(field.name(), bson::Bson::Int32(1));
         }
         criteria.insert("$project", project);
         let coll = self
@@ -108,7 +106,7 @@ impl Reader {
         }
 
         let docs_len = docs.len();
-        self.current_index = self.current_index + docs_len;
+        self.current_index += docs_len;
         if docs_len == 0 {
             return Ok(None);
         }
@@ -135,11 +133,11 @@ impl Reader {
                         TimeUnit::Millisecond => builder
                             .field_builder::<TimestampMillisecondBuilder>(i)
                             .unwrap(),
-                        t @ _ => panic!("Timestamp arrays can only be read as milliseconds, found {:?}. \nPlease read as milliseconds then cast to desired resolution.", t)
+                        t => panic!("Timestamp arrays can only be read as milliseconds, found {:?}. \nPlease read as milliseconds then cast to desired resolution.", t)
                     };
                     for v in 0..docs_len {
                         let doc: &_ = docs.get(v).unwrap();
-                        match doc.get_utc_datetime(field.name()) {
+                        match doc.get_datetime(field.name()) {
                             Ok(val) => field_builder.append_value(val.timestamp_millis()).unwrap(),
                             Err(_) => field_builder.append_null().unwrap(),
                         };
@@ -194,7 +192,7 @@ impl Reader {
                 }
                 DataType::List(_dtype) => panic!("Creating lists not yet implemented"),
                 DataType::Struct(_fields) => panic!("Creating nested structs not yet implemented"),
-                t @ _ => panic!("Data type {:?} not supported when reading from MongoDB", t),
+                t => panic!("Data type {:?} not supported when reading from MongoDB", t),
             }
         }
         // append true to all struct records
@@ -206,11 +204,11 @@ impl Reader {
 }
 
 impl RecordBatchReader for Reader {
-    fn schema(&mut self) -> Arc<Schema> {
+    fn schema(&self) -> Arc<Schema> {
         Arc::new(self.schema.clone())
     }
     fn next_batch(&mut self) -> arrow::error::Result<Option<RecordBatch>> {
-        self.next().map_err(|_| {
+        self.next_batch().map_err(|_| {
             arrow::error::ArrowError::IoError("Unable to read next batch from MongoDB".to_string())
         })
     }
@@ -259,7 +257,7 @@ mod tests {
         // write results to CSV as the schema would allow
         let file = File::create("./target/debug/delays.csv").unwrap();
         let mut writer = csv::Writer::new(file);
-        while let Ok(Some(batch)) = reader.next() {
+        while let Ok(Some(batch)) = reader.next_batch() {
             writer.write(&batch).unwrap();
         }
         Ok(())

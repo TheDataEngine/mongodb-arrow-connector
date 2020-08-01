@@ -6,10 +6,8 @@ use arrow::{
 };
 use bson::doc;
 use chrono::{DateTime, NaiveDateTime, Utc};
-use mongodb::{
-    options::{ClientOptions, StreamAddress},
-    Client,
-};
+use mongodb::options::{ClientOptions, StreamAddress};
+use mongodb::sync::Client;
 
 /// Configuration for the MongoDB writer
 pub struct WriterConfig<'a> {
@@ -71,7 +69,7 @@ impl Writer {
                 .database(config.database)
                 .collection(config.collection)
                 .drop(None);
-            if let Err(_) = drop {
+            if drop.is_err() {
                 println!("Collection does not exist, and was not dropped");
             }
         }
@@ -105,7 +103,7 @@ impl Writer {
     }
 
     /// MongoDB supports a subset of Apache Arrow supported types, check if schema can be written
-    fn check_supported_schema(fields: &Vec<Field>, coerce_types: bool) -> Result<(), ()> {
+    fn check_supported_schema(fields: &[Field], coerce_types: bool) -> Result<(), ()> {
         for field in fields {
             let t = field.data_type();
             match t {
@@ -131,6 +129,7 @@ impl Writer {
                 | DataType::Float32
                 | DataType::Float64
                 | DataType::Utf8
+                | DataType::LargeUtf8
                 | DataType::Timestamp(_, _) => {
                     // data types supported without coercion
                 }
@@ -138,9 +137,11 @@ impl Writer {
                     eprintln!("Float16 arrays not supported");
                     return Err(());
                 }
-                DataType::List(data_type) | DataType::FixedSizeList(data_type, _) => {
+                DataType::List(data_type)
+                | DataType::LargeList(data_type)
+                | DataType::FixedSizeList(data_type, _) => {
                     Writer::check_supported_schema(
-                        &vec![Field::new(field.name().as_str(), *data_type.clone(), false)],
+                        &[Field::new(field.name().as_str(), *data_type.clone(), false)],
                         coerce_types,
                     )?;
                 }
@@ -152,13 +153,26 @@ impl Writer {
                 | DataType::Duration(_)
                 | DataType::Interval(_)
                 | DataType::Binary
+                | DataType::LargeBinary
                 | DataType::FixedSizeBinary(_) => {
+                    eprintln!("Data type {:?} is not supported", t);
+                    return Err(());
+                }
+                DataType::Null => {
+                    eprintln!("Data type {:?} is not supported", t);
+                    return Err(());
+                }
+                DataType::Union(_) => {
+                    eprintln!("Data type {:?} is not supported", t);
+                    return Err(());
+                }
+                DataType::Dictionary(_, _) => {
                     eprintln!("Data type {:?} is not supported", t);
                     return Err(());
                 }
             }
         }
-        return Ok(());
+        Ok(())
     }
 }
 
@@ -179,6 +193,7 @@ impl From<&RecordBatch> for Documents {
                         .as_any()
                         .downcast_ref::<BooleanArray>()
                         .expect("Unable to unwrap array");
+                    #[allow(clippy::needless_range_loop)]
                     for i in 0..len {
                         if !array.is_null(i) {
                             documents[i].insert(field.name(), array.value(i));
@@ -196,6 +211,7 @@ impl From<&RecordBatch> for Documents {
                         .as_any()
                         .downcast_ref::<Int32Array>()
                         .expect("Unable to unwrap array");
+                    #[allow(clippy::needless_range_loop)]
                     for i in 0..len {
                         if !array.is_null(i) {
                             documents[i].insert(field.name(), array.value(i));
@@ -208,6 +224,7 @@ impl From<&RecordBatch> for Documents {
                         .as_any()
                         .downcast_ref::<Int64Array>()
                         .expect("Unable to unwrap array");
+                    #[allow(clippy::needless_range_loop)]
                     for i in 0..len {
                         if !array.is_null(i) {
                             documents[i].insert(field.name(), array.value(i));
@@ -220,6 +237,7 @@ impl From<&RecordBatch> for Documents {
                         .as_any()
                         .downcast_ref::<Float32Array>()
                         .expect("Unable to unwrap array");
+                    #[allow(clippy::needless_range_loop)]
                     for i in 0..len {
                         if !array.is_null(i) {
                             documents[i].insert(field.name(), array.value(i));
@@ -231,6 +249,7 @@ impl From<&RecordBatch> for Documents {
                         .as_any()
                         .downcast_ref::<Float64Array>()
                         .expect("Unable to unwrap array");
+                    #[allow(clippy::needless_range_loop)]
                     for i in 0..len {
                         if !array.is_null(i) {
                             documents[i].insert(field.name(), array.value(i));
@@ -244,12 +263,13 @@ impl From<&RecordBatch> for Documents {
                         .as_any()
                         .downcast_ref::<TimestampMillisecondArray>()
                         .expect("Unable to unwrap array");
+                    #[allow(clippy::needless_range_loop)]
                     for i in 0..len {
                         if !array.is_null(i) {
                             let value = array.value(i);
                             documents[i].insert(
                                 field.name(),
-                                bson::Bson::UtcDatetime(DateTime::<Utc>::from_utc(
+                                bson::Bson::DateTime(DateTime::<Utc>::from_utc(
                                     NaiveDateTime::from_timestamp(value / 1000, 0),
                                     Utc,
                                 )),
@@ -268,6 +288,7 @@ impl From<&RecordBatch> for Documents {
                         .as_any()
                         .downcast_ref::<StringArray>()
                         .expect("Unable to unwrap array");
+                    #[allow(clippy::needless_range_loop)]
                     for i in 0..len {
                         if !array.is_null(i) {
                             documents[i].insert(field.name(), array.value(i));
@@ -279,7 +300,7 @@ impl From<&RecordBatch> for Documents {
                     panic!("Write support for lists not yet implemented")
                 }
                 DataType::Struct(_) => panic!("Write support for structs not yet implemented"),
-                t @ _ => panic!("Encountered unwritable data type {:?}", t),
+                t => panic!("Encountered unwritable data type {:?}", t),
             });
 
         Self(documents)
@@ -334,7 +355,7 @@ mod tests {
         let writer = Writer::try_new(&writer_config, schema)?;
 
         // read from a collection and write to another
-        while let Ok(Some(batch)) = reader.next() {
+        while let Ok(Some(batch)) = reader.next_batch() {
             writer.write(&batch)?
         }
         Ok(())
