@@ -1,7 +1,7 @@
 [package]
 name = "mongodb-arrow-connector"
 description = "MongoDB connector that reads and writes data to/from Apache Arrow"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Neville Dipale <nevilledips@gmail.com>"]
 edition = "2018"
 license = "Apache-2.0"
