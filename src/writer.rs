@@ -2,12 +2,15 @@ use arrow::{
     array::*,
     compute::cast,
     datatypes::{DataType, Field, Schema, TimeUnit},
+    error::{ArrowError, Result},
     record_batch::RecordBatch,
 };
 use bson::doc;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use mongodb::options::{ClientOptions, StreamAddress};
 use mongodb::sync::Client;
+
+use crate::utils::mongo_to_arrow_error;
 
 /// Configuration for the MongoDB writer
 pub struct WriterConfig<'a> {
@@ -52,7 +55,7 @@ pub struct Writer {
 
 impl Writer {
     /// Try to create a new writer, with provided writer options and a schema
-    pub fn try_new(config: &WriterConfig, schema: Schema) -> Result<Self, ()> {
+    pub fn try_new(config: &WriterConfig, schema: Schema) -> Result<Self> {
         // check if data types can be written
         Writer::check_supported_schema(schema.fields(), config.coerce_types)?;
         let options = ClientOptions::builder()
@@ -83,10 +86,11 @@ impl Writer {
     }
 
     /// Write a batch to the database
-    pub fn write(&self, batch: &RecordBatch) -> Result<(), ()> {
+    pub fn write(&self, batch: &RecordBatch) -> Result<()> {
         if batch.schema().as_ref() != &self.schema {
-            eprintln!("Schema of record batch does not match writer");
-            return Err(());
+            return Err(ArrowError::SchemaError(
+                "Schema of record batch does not match writer".to_string(),
+            ));
         }
         // the easiest way could be to create struct to document conversions
         let documents = Documents::from(batch);
@@ -97,13 +101,11 @@ impl Writer {
 
         coll.insert_many(documents.0, None)
             .map(|_| {})
-            .map_err(|e| {
-                eprintln!("Error inserting many documents {:?}", e);
-            })
+            .map_err(|e| mongo_to_arrow_error(e))
     }
 
     /// MongoDB supports a subset of Apache Arrow supported types, check if schema can be written
-    fn check_supported_schema(fields: &[Field], coerce_types: bool) -> Result<(), ()> {
+    fn check_supported_schema(fields: &[Field], coerce_types: bool) -> Result<()> {
         for field in fields {
             let t = field.data_type();
             match t {
@@ -112,15 +114,14 @@ impl Writer {
                 | DataType::UInt8
                 | DataType::UInt16
                 | DataType::UInt32
-                | DataType::Date32(_)
-                | DataType::Date64(_)
+                | DataType::Date32
+                | DataType::Date64
                 | DataType::UInt64 => {
                     if !coerce_types {
-                        eprintln!(
+                        return Err(ArrowError::InvalidArgumentError(format!(
                             "Data type {:?} not supported unless it is coerced to another type",
                             t
-                        );
-                        return Err(());
+                        )));
                     }
                 }
                 DataType::Boolean
@@ -134,16 +135,14 @@ impl Writer {
                     // data types supported without coercion
                 }
                 DataType::Float16 => {
-                    eprintln!("Float16 arrays not supported");
-                    return Err(());
+                    return Err(ArrowError::InvalidArgumentError(
+                        "Float16 arrays not supported".to_string(),
+                    ));
                 }
                 DataType::List(data_type)
                 | DataType::LargeList(data_type)
                 | DataType::FixedSizeList(data_type, _) => {
-                    Writer::check_supported_schema(
-                        &[Field::new(field.name().as_str(), *data_type.clone(), false)],
-                        coerce_types,
-                    )?;
+                    Writer::check_supported_schema(&[(&**data_type).clone()], coerce_types)?;
                 }
                 DataType::Struct(fields) => {
                     Writer::check_supported_schema(fields, coerce_types)?;
@@ -155,20 +154,34 @@ impl Writer {
                 | DataType::Binary
                 | DataType::LargeBinary
                 | DataType::FixedSizeBinary(_) => {
-                    eprintln!("Data type {:?} is not supported", t);
-                    return Err(());
+                    return Err(ArrowError::InvalidArgumentError(format!(
+                        "Data type {:?} not supported",
+                        t
+                    )));
                 }
                 DataType::Null => {
-                    eprintln!("Data type {:?} is not supported", t);
-                    return Err(());
+                    return Err(ArrowError::InvalidArgumentError(format!(
+                        "Data type {:?} not supported",
+                        t
+                    )));
                 }
                 DataType::Union(_) => {
-                    eprintln!("Data type {:?} is not supported", t);
-                    return Err(());
+                    return Err(ArrowError::InvalidArgumentError(format!(
+                        "Data type {:?} not supported",
+                        t
+                    )));
                 }
                 DataType::Dictionary(_, _) => {
-                    eprintln!("Data type {:?} is not supported", t);
-                    return Err(());
+                    return Err(ArrowError::InvalidArgumentError(format!(
+                        "Data type {:?} not supported",
+                        t
+                    )));
+                }
+                DataType::Decimal(_, _) => {
+                    return Err(ArrowError::InvalidArgumentError(format!(
+                        "Data type {:?} not supported",
+                        t
+                    )));
                 }
             }
         }
@@ -256,7 +269,7 @@ impl From<&RecordBatch> for Documents {
                         }
                     }
                 }
-                DataType::Timestamp(_, _) | DataType::Date32(_) | DataType::Date64(_) => {
+                DataType::Timestamp(_, _) | DataType::Date32 | DataType::Date64 => {
                     let array =
                         cast(col, &DataType::Timestamp(TimeUnit::Millisecond, None)).unwrap();
                     let array = array
@@ -315,7 +328,7 @@ mod tests {
     use arrow::datatypes::Field;
 
     #[test]
-    fn test_write_collection() -> Result<(), ()> {
+    fn test_write_collection() -> Result<()> {
         let fields = vec![
             Field::new("_id", DataType::Utf8, false),
             Field::new("trip_id", DataType::Utf8, false),

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use arrow::{
     array::*,
     datatypes::{DataType, Schema, TimeUnit},
+    error::Result,
     record_batch::{RecordBatch, RecordBatchReader},
 };
 use bson::{doc, Bson};
@@ -42,7 +43,7 @@ pub struct Reader {
 
 impl Reader {
     /// Try to create a new reader
-    pub fn try_new(config: &ReaderConfig, schema: Schema) -> Result<Self, ()> {
+    pub fn try_new(config: &ReaderConfig, schema: Schema) -> Result<Self> {
         let options = ClientOptions::builder()
             .hosts(vec![StreamAddress {
                 hostname: config.hostname.to_string(),
@@ -53,26 +54,26 @@ impl Reader {
         let client = Client::with_options(options).expect("Unable to connect to MongoDB");
 
         Ok(Self {
-            /// MongoDB client. The client supports connection pooling, and is suitable for parallel querying
+            // MongoDB client. The client supports connection pooling, and is suitable for parallel querying
             client,
-            /// Database name
+            // Database name
             database: config.database.to_string(),
-            /// Collection name
+            // Collection name
             collection: config.collection.to_string(),
-            /// The schema of the collection being read
+            // The schema of the collection being read
             schema,
-            /// An internal counter to track the number of documents read
+            // An internal counter to track the number of documents read
             current_index: 0,
-            /// The batch size that should be returned from the database
-            ///
-            /// If documents are relatively small, or there is ample RAM, a very large batch size should be used
-            /// to reduce the number of roundtrips to the database
+            // The batch size that should be returned from the database
+            //
+            // If documents are relatively small, or there is ample RAM, a very large batch size should be used
+            // to reduce the number of roundtrips to the database
             batch_size: 1024000,
         })
     }
 
     /// Read the next record batch
-    pub fn next_batch(&mut self) -> Result<Option<RecordBatch>, ()> {
+    pub fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         let mut criteria = doc! {};
         let mut project = doc! {};
         for field in self.schema.fields() {
@@ -111,7 +112,7 @@ impl Reader {
             return Ok(None);
         }
 
-        let mut builder = StructBuilder::from_schema(self.schema.clone(), self.current_index);
+        let mut builder = StructBuilder::from_fields(self.schema.fields().clone(), self.batch_size);
 
         let field_len = self.schema.fields().len();
         for i in 0..field_len {
@@ -203,6 +204,18 @@ impl Reader {
     }
 }
 
+impl Iterator for Reader {
+    type Item = arrow::error::Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_batch()
+            .map_err(|_| {
+                arrow::error::ArrowError::IoError("Error reading from MongoDB".to_string())
+            })
+            .transpose()
+    }
+}
+
 impl RecordBatchReader for Reader {
     fn schema(&self) -> Arc<Schema> {
         Arc::new(self.schema.clone())
@@ -224,7 +237,7 @@ mod tests {
     use arrow::datatypes::Field;
 
     #[test]
-    fn test_read_collection() -> Result<(), ()> {
+    fn test_read_collection() -> Result<()> {
         let fields = vec![
             Field::new("_id", DataType::Utf8, false),
             Field::new("trip_id", DataType::Utf8, false),
