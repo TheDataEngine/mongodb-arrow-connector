@@ -1,24 +1,24 @@
-use std::sync::Arc;
-
 use arrow::{
     array::*,
-    datatypes::{DataType, Schema, TimeUnit},
+    datatypes::{DataType, SchemaRef, TimeUnit},
+    error::Result,
     record_batch::{RecordBatch, RecordBatchReader},
 };
 use bson::{doc, Bson};
 use mongodb::options::{AggregateOptions, ClientOptions, StreamAddress};
 use mongodb::sync::Client;
 
+#[derive(Clone, Debug)]
 /// Configuration for the MongoDB reader
-pub struct ReaderConfig<'a> {
+pub struct ReaderConfig {
     /// The hostname to connect to
-    pub hostname: &'a str,
+    pub hostname: String,
     /// An optional port, defaults to 27017
     pub port: Option<u16>,
     /// The name of the database to read from
-    pub database: &'a str,
+    pub database: String,
     /// The name of the collection to read from
-    pub collection: &'a str,
+    pub collection: String,
 }
 
 /// Database reader
@@ -30,7 +30,7 @@ pub struct Reader {
     /// The name of the collection to read from
     collection: String,
     /// The schema of the data to read
-    schema: Schema,
+    schema: SchemaRef,
     /// An internal tracker of the current index that has been read
     current_index: usize,
     /// The preferred batch size per document.
@@ -42,7 +42,7 @@ pub struct Reader {
 
 impl Reader {
     /// Try to create a new reader
-    pub fn try_new(config: &ReaderConfig, schema: Schema) -> Result<Self, ()> {
+    pub fn try_new(config: &ReaderConfig, schema: SchemaRef) -> Result<Self> {
         let options = ClientOptions::builder()
             .hosts(vec![StreamAddress {
                 hostname: config.hostname.to_string(),
@@ -53,26 +53,31 @@ impl Reader {
         let client = Client::with_options(options).expect("Unable to connect to MongoDB");
 
         Ok(Self {
-            /// MongoDB client. The client supports connection pooling, and is suitable for parallel querying
+            // MongoDB client. The client supports connection pooling, and is suitable for parallel querying
             client,
-            /// Database name
+            // Database name
             database: config.database.to_string(),
-            /// Collection name
+            // Collection name
             collection: config.collection.to_string(),
-            /// The schema of the collection being read
+            // The schema of the collection being read
             schema,
-            /// An internal counter to track the number of documents read
+            // An internal counter to track the number of documents read
             current_index: 0,
-            /// The batch size that should be returned from the database
-            ///
-            /// If documents are relatively small, or there is ample RAM, a very large batch size should be used
-            /// to reduce the number of roundtrips to the database
+            // The batch size that should be returned from the database
+            //
+            // If documents are relatively small, or there is ample RAM, a very large batch size should be used
+            // to reduce the number of roundtrips to the database
             batch_size: 1024000,
         })
     }
 
+    /// Get reader schema
+    pub fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
     /// Read the next record batch
-    pub fn next_batch(&mut self) -> Result<Option<RecordBatch>, ()> {
+    pub fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         let mut criteria = doc! {};
         let mut project = doc! {};
         for field in self.schema.fields() {
@@ -111,7 +116,7 @@ impl Reader {
             return Ok(None);
         }
 
-        let mut builder = StructBuilder::from_schema(self.schema.clone(), self.current_index);
+        let mut builder = StructBuilder::from_fields(self.schema.fields().clone(), self.batch_size);
 
         let field_len = self.schema.fields().len();
         for i in 0..field_len {
@@ -203,9 +208,21 @@ impl Reader {
     }
 }
 
+impl Iterator for Reader {
+    type Item = arrow::error::Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_batch()
+            .map_err(|_| {
+                arrow::error::ArrowError::IoError("Error reading from MongoDB".to_string())
+            })
+            .transpose()
+    }
+}
+
 impl RecordBatchReader for Reader {
-    fn schema(&self) -> Arc<Schema> {
-        Arc::new(self.schema.clone())
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
     fn next_batch(&mut self) -> arrow::error::Result<Option<RecordBatch>> {
         self.next_batch().map_err(|_| {
@@ -219,12 +236,13 @@ mod tests {
     use super::*;
 
     use std::fs::File;
+    use std::sync::Arc;
 
     use arrow::csv;
-    use arrow::datatypes::Field;
+    use arrow::datatypes::{Field, Schema};
 
     #[test]
-    fn test_read_collection() -> Result<(), ()> {
+    fn test_read_collection() -> Result<()> {
         let fields = vec![
             Field::new("_id", DataType::Utf8, false),
             Field::new("trip_id", DataType::Utf8, false),
@@ -247,12 +265,12 @@ mod tests {
         ];
         let schema = Schema::new(fields);
         let config = ReaderConfig {
-            hostname: "localhost",
+            hostname: "localhost".to_string(),
             port: None,
-            database: "mycollection",
-            collection: "delays_",
+            database: "mycollection".to_string(),
+            collection: "delays_".to_string(),
         };
-        let mut reader = Reader::try_new(&config, schema)?;
+        let mut reader = Reader::try_new(&config, Arc::new(schema))?;
 
         // write results to CSV as the schema would allow
         let file = File::create("./target/debug/delays.csv").unwrap();

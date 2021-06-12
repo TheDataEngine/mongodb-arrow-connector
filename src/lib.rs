@@ -10,3 +10,5 @@
 pub mod reader;
 /// MongoDB writer
 pub mod writer;
+
+mod utils;
