@@ -14,6 +14,7 @@ We are curently writing this library due to a need to read MongoDB data into dat
 - [X] Write from batches to a collection
 - [ ] Infer collection schema
 - [ ] Projection predicate push-down
+- [ ] Filter predicate push-down
 - [ ] Data types
   - [X] Primitive types that MongoDB supports
   - [ ] List types
