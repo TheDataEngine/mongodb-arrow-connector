@@ -323,9 +323,12 @@ impl From<&RecordBatch> for Documents {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader::*;
+
+    use std::sync::Arc;
 
     use arrow::datatypes::Field;
+
+    use crate::reader::*;
 
     #[test]
     fn test_write_collection() -> Result<()> {
@@ -351,12 +354,12 @@ mod tests {
         ];
         let schema = Schema::new(fields);
         let reader_config = ReaderConfig {
-            hostname: "localhost",
+            hostname: "localhost".to_string(),
             port: None,
-            database: "mycollection",
-            collection: "delays_",
+            database: "mycollection".to_string(),
+            collection: "delays_".to_string(),
         };
-        let mut reader = Reader::try_new(&reader_config, schema.clone())?;
+        let mut reader = Reader::try_new(&reader_config, Arc::new(schema.clone()))?;
         let writer_config = WriterConfig {
             hostname: "localhost",
             port: None,
