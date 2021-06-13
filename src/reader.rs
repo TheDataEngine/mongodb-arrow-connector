@@ -1,10 +1,7 @@
-use arrow::{
-    array::*,
-    datatypes::{DataType, SchemaRef, TimeUnit},
-    error::Result,
-    record_batch::{RecordBatch, RecordBatchReader},
-};
-use bson::{doc, Bson};
+use std::time::Duration;
+
+use arrow::{array::*, datatypes::{DataType, SchemaRef, TimeUnit}, error::{ArrowError, Result}, record_batch::{RecordBatch, RecordBatchReader}};
+use bson::{Bson, Document, doc};
 use mongodb::options::{AggregateOptions, ClientOptions, StreamAddress};
 use mongodb::sync::Client;
 
@@ -31,6 +28,8 @@ pub struct Reader {
     collection: String,
     /// The schema of the data to read
     schema: SchemaRef,
+    /// The filters to apply
+    filters: Vec<Document>,
     /// An internal tracker of the current index that has been read
     current_index: usize,
     /// The preferred batch size per document.
@@ -38,20 +37,20 @@ pub struct Reader {
     ///   a larger batch size is more performant as it would result in
     ///   less roundtrips to the database.
     batch_size: usize,
+    /// The remaining limit of documents to get after getting each batch
+    remaining_limit: usize
 }
 
 impl Reader {
     /// Try to create a new reader
-    pub fn try_new(config: &ReaderConfig, schema: SchemaRef) -> Result<Self> {
-        let options = ClientOptions::builder()
-            .hosts(vec![StreamAddress {
-                hostname: config.hostname.to_string(),
-                port: config.port,
-            }])
-            .build();
-        // TODO: support connection with uri_string
-        let client = Client::with_options(options).expect("Unable to connect to MongoDB");
-
+    pub fn try_new(
+        config: &ReaderConfig, 
+        schema: SchemaRef, 
+        filters: Vec<Document>,
+        limit: Option<usize>,
+        skip: Option<usize>
+    ) -> Result<Self> {
+        let client = get_client(config)?;
         Ok(Self {
             // MongoDB client. The client supports connection pooling, and is suitable for parallel querying
             client,
@@ -61,14 +60,55 @@ impl Reader {
             collection: config.collection.to_string(),
             // The schema of the collection being read
             schema,
+            filters,
             // An internal counter to track the number of documents read
-            current_index: 0,
+            current_index: skip.unwrap_or_default(),
             // The batch size that should be returned from the database
             //
             // If documents are relatively small, or there is ample RAM, a very large batch size should be used
             // to reduce the number of roundtrips to the database
-            batch_size: 1024000,
+            batch_size: 65536,
+            remaining_limit: limit.unwrap_or(i32::MAX as usize),
         })
+    }
+
+    /// Try to estimate the number of rows, to enable partitioning.
+    ///
+    /// Should time out after a short period to avoid spending too much time.
+    pub fn estimate_records(config: &ReaderConfig, filters: Vec<Document>, max_time_ms: Option<u64>) -> Result<Option<usize>> {
+        let client = get_client(config)?;
+
+        let coll = client
+            .database(config.database.as_ref())
+            .collection(config.collection.as_ref());
+
+        let aggregate_options = AggregateOptions::builder()
+        .max_time(Duration::from_millis(max_time_ms.unwrap_or(10000)))
+            .build();
+
+        let mut matches = filters;
+        matches.push(doc! {"$group": {
+            "_id": 1,
+            "count": {
+                "$sum": 1
+            }
+        } });
+
+        let cursor = coll
+            .aggregate(
+                matches,
+                Some(aggregate_options),
+            );
+        if cursor.is_err() {
+            return Ok(None);
+        }
+
+        let mut cursor = cursor.unwrap();
+
+        let record = cursor.next().unwrap().unwrap();
+        dbg!(&record);
+        let count = record.get_i32("count").unwrap();
+        Ok(Some(count as usize))
     }
 
     /// Get reader schema
@@ -80,10 +120,16 @@ impl Reader {
     pub fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         let mut criteria = doc! {};
         let mut project = doc! {};
+        let mut matches = vec![];
         for field in self.schema.fields() {
             project.insert(field.name(), bson::Bson::Int32(1));
         }
         criteria.insert("$project", project);
+        // add filters
+        let mut filters = self.filters.clone();
+        if !self.filters.is_empty() {
+            matches.append(&mut filters);
+        }
         let coll = self
             .client
             .database(self.database.as_ref())
@@ -93,9 +139,22 @@ impl Reader {
             .batch_size(Some(self.batch_size as u32))
             .build();
 
+        // push projection to matches
+        matches.push(criteria);
+        matches.push(doc! {"$skip": self.current_index as i32});
+        let limit = self.batch_size.min(self.remaining_limit);
+        if limit == 0 {
+            return Ok(None)
+        }
+        matches.push(doc! {"$limit": limit as i32});
+        self.current_index += self.batch_size;
+        self.remaining_limit -= limit;
+
+        dbg!(&matches);
+
         let mut cursor = coll
             .aggregate(
-                vec![criteria, doc! {"$skip": self.current_index as i32}],
+                matches,
                 Some(aggregate_options),
             )
             .expect("Unable to run aggregation");
@@ -111,7 +170,6 @@ impl Reader {
         }
 
         let docs_len = docs.len();
-        self.current_index += docs_len;
         if docs_len == 0 {
             return Ok(None);
         }
@@ -208,6 +266,18 @@ impl Reader {
     }
 }
 
+fn get_client(config: &ReaderConfig) -> Result<Client> {
+    let options = ClientOptions::builder()
+        .hosts(vec![StreamAddress {
+            hostname: config.hostname.to_string(),
+            port: config.port,
+        }])
+        .build();
+    Client::with_options(options).map_err(|e| {
+        ArrowError::ExternalError(Box::new(e))
+    })
+}
+
 impl Iterator for Reader {
     type Item = arrow::error::Result<RecordBatch>;
 
@@ -270,7 +340,7 @@ mod tests {
             database: "mycollection".to_string(),
             collection: "delays_".to_string(),
         };
-        let mut reader = Reader::try_new(&config, Arc::new(schema))?;
+        let mut reader = Reader::try_new(&config, Arc::new(schema), vec![], None, None)?;
 
         // write results to CSV as the schema would allow
         let file = File::create("./target/debug/delays.csv").unwrap();

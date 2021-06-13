@@ -101,7 +101,7 @@ impl Writer {
 
         coll.insert_many(documents.0, None)
             .map(|_| {})
-            .map_err(|e| mongo_to_arrow_error(e))
+            .map_err(mongo_to_arrow_error)
     }
 
     /// MongoDB supports a subset of Apache Arrow supported types, check if schema can be written
@@ -359,7 +359,7 @@ mod tests {
             database: "mycollection".to_string(),
             collection: "delays_".to_string(),
         };
-        let mut reader = Reader::try_new(&reader_config, Arc::new(schema.clone()))?;
+        let mut reader = Reader::try_new(&reader_config, Arc::new(schema.clone()), vec![], None, None)?;
         let writer_config = WriterConfig {
             hostname: "localhost",
             port: None,
