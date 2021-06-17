@@ -359,7 +359,8 @@ mod tests {
             database: "mycollection".to_string(),
             collection: "delays_".to_string(),
         };
-        let mut reader = Reader::try_new(&reader_config, Arc::new(schema.clone()), vec![], None, None)?;
+        let mut reader =
+            Reader::try_new(&reader_config, Arc::new(schema.clone()), vec![], None, None)?;
         let writer_config = WriterConfig {
             hostname: "localhost",
             port: None,

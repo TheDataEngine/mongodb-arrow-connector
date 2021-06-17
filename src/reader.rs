@@ -1,7 +1,12 @@
 use std::time::Duration;
 
-use arrow::{array::*, datatypes::{DataType, SchemaRef, TimeUnit}, error::{ArrowError, Result}, record_batch::{RecordBatch, RecordBatchReader}};
-use bson::{Bson, Document, doc};
+use arrow::{
+    array::*,
+    datatypes::{DataType, SchemaRef, TimeUnit},
+    error::{ArrowError, Result},
+    record_batch::{RecordBatch, RecordBatchReader},
+};
+use bson::{doc, Bson, Document};
 use mongodb::options::{AggregateOptions, ClientOptions, StreamAddress};
 use mongodb::sync::Client;
 
@@ -38,17 +43,17 @@ pub struct Reader {
     ///   less roundtrips to the database.
     batch_size: usize,
     /// The remaining limit of documents to get after getting each batch
-    remaining_limit: usize
+    remaining_limit: usize,
 }
 
 impl Reader {
     /// Try to create a new reader
     pub fn try_new(
-        config: &ReaderConfig, 
-        schema: SchemaRef, 
+        config: &ReaderConfig,
+        schema: SchemaRef,
         filters: Vec<Document>,
         limit: Option<usize>,
-        skip: Option<usize>
+        skip: Option<usize>,
     ) -> Result<Self> {
         let client = get_client(config)?;
         Ok(Self {
@@ -75,7 +80,11 @@ impl Reader {
     /// Try to estimate the number of rows, to enable partitioning.
     ///
     /// Should time out after a short period to avoid spending too much time.
-    pub fn estimate_records(config: &ReaderConfig, filters: Vec<Document>, max_time_ms: Option<u64>) -> Result<Option<usize>> {
+    pub fn estimate_records(
+        config: &ReaderConfig,
+        filters: Vec<Document>,
+        max_time_ms: Option<u64>,
+    ) -> Result<Option<usize>> {
         let client = get_client(config)?;
 
         let coll = client
@@ -83,7 +92,7 @@ impl Reader {
             .collection(config.collection.as_ref());
 
         let aggregate_options = AggregateOptions::builder()
-        .max_time(Duration::from_millis(max_time_ms.unwrap_or(10000)))
+            .max_time(Duration::from_millis(max_time_ms.unwrap_or(10000)))
             .build();
 
         let mut matches = filters;
@@ -94,11 +103,7 @@ impl Reader {
             }
         } });
 
-        let cursor = coll
-            .aggregate(
-                matches,
-                Some(aggregate_options),
-            );
+        let cursor = coll.aggregate(matches, Some(aggregate_options));
         if cursor.is_err() {
             return Ok(None);
         }
@@ -144,19 +149,14 @@ impl Reader {
         matches.push(doc! {"$skip": self.current_index as i32});
         let limit = self.batch_size.min(self.remaining_limit);
         if limit == 0 {
-            return Ok(None)
+            return Ok(None);
         }
         matches.push(doc! {"$limit": limit as i32});
         self.current_index += self.batch_size;
         self.remaining_limit -= limit;
 
-        dbg!(&matches);
-
         let mut cursor = coll
-            .aggregate(
-                matches,
-                Some(aggregate_options),
-            )
+            .aggregate(matches, Some(aggregate_options))
             .expect("Unable to run aggregation");
 
         // collect results from cursor into batches
@@ -273,9 +273,7 @@ fn get_client(config: &ReaderConfig) -> Result<Client> {
             port: config.port,
         }])
         .build();
-    Client::with_options(options).map_err(|e| {
-        ArrowError::ExternalError(Box::new(e))
-    })
+    Client::with_options(options).map_err(|e| ArrowError::ExternalError(Box::new(e)))
 }
 
 impl Iterator for Reader {

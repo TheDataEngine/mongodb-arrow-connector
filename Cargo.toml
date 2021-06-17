@@ -15,3 +15,7 @@ bson = "1.0"
 mongodb = { version = "1.0", default-features = false, features = ["sync"] }
 arrow = { version = "4.0", default-features = false }
 chrono = "0.4"
+
+[[bin]]
+name = "csv_to_mongo"
+path = "bin/csv_to_mongo.rs"
