@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::iter::FromIterator;
+use std::{sync::Arc, time::Duration};
 
 use arrow::{
     array::*,
@@ -6,14 +7,15 @@ use arrow::{
     error::{ArrowError, Result},
     record_batch::RecordBatch,
 };
+use async_stream::stream;
 use bson::{doc, Bson, Document};
-use futures_util::stream::StreamExt;
+use futures_util::stream::{Stream, StreamExt};
 use mongodb::{
     options::{AggregateOptions, ClientOptions, ServerAddress},
     Client,
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 /// Configuration for the MongoDB reader
 pub struct ReaderConfig {
     /// The hostname to connect to
@@ -51,6 +53,8 @@ pub struct Reader {
     batch_size: usize,
     /// The remaining limit of documents to get after getting each batch
     remaining_limit: usize,
+    /// Vector of documents, reused to reduce allocations
+    documents: Vec<Document>,
 }
 
 impl Reader {
@@ -79,8 +83,9 @@ impl Reader {
             //
             // If documents are relatively small, or there is ample RAM, a very large batch size should be used
             // to reduce the number of roundtrips to the database
-            batch_size: 65536,
+            batch_size: 1024 * 1024,
             remaining_limit: limit.unwrap_or(i32::MAX as usize),
+            documents: Vec::with_capacity(1024 * 1024),
         })
     }
 
@@ -162,117 +167,135 @@ impl Reader {
         self.current_index += self.batch_size;
         self.remaining_limit -= limit;
 
-        dbg!(&matches);
-
         let mut cursor = coll
             .aggregate(matches, Some(aggregate_options))
             .await
             .expect("Unable to run aggregation");
 
         // collect results from cursor into batches
-        let mut docs = vec![];
+        self.documents.clear();
         for _ in 0..self.batch_size {
             if let Some(Ok(doc)) = cursor.next().await {
-                docs.push(doc);
+                self.documents.push(doc);
             } else {
                 break;
             }
         }
 
-        let docs_len = docs.len();
+        let docs_len = self.documents.len();
         if docs_len == 0 {
             return Ok(None);
         }
 
-        let mut builder = StructBuilder::from_fields(self.schema.fields().clone(), self.batch_size);
+        let mut arrays = Vec::with_capacity(self.schema().fields().len());
 
-        let field_len = self.schema.fields().len();
-        for i in 0..field_len {
-            let field = self.schema.field(i);
+        for field in self.schema().fields() {
             match field.data_type() {
-                DataType::Binary => {}
+                DataType::Binary => {
+                    let array = BinaryArray::from_iter(
+                        self.documents
+                            .iter()
+                            .map(|doc| doc.get_binary_generic(field.name()).ok()),
+                    );
+                    arrays.push(Arc::new(array) as ArrayRef);
+                }
                 DataType::Boolean => {
-                    let field_builder = builder.field_builder::<BooleanBuilder>(i).unwrap();
-                    for v in 0..docs_len {
-                        let doc: &_ = docs.get(v).unwrap();
-                        match doc.get_bool(field.name()) {
-                            Ok(val) => field_builder.append_value(val).unwrap(),
-                            Err(_) => field_builder.append_null().unwrap(),
-                        };
-                    }
+                    let array = BooleanArray::from_iter(
+                        self.documents
+                            .iter()
+                            .map(|doc| doc.get_bool(field.name()).ok()),
+                    );
+                    arrays.push(Arc::new(array) as ArrayRef);
                 }
                 DataType::Timestamp(time_unit, _) => {
-                    let field_builder = match time_unit {
-                        TimeUnit::Millisecond => builder
-                            .field_builder::<TimestampMillisecondBuilder>(i)
-                            .unwrap(),
-                        t => panic!("Timestamp arrays can only be read as milliseconds, found {:?}. \nPlease read as milliseconds then cast to desired resolution.", t)
+                    let array = match time_unit {
+                        TimeUnit::Second => Arc::new(TimestampSecondArray::from_iter(
+                            self.documents.iter().map(|doc| {
+                                doc.get_datetime(field.name())
+                                    .ok()
+                                    .map(|v| v.timestamp_millis() / 1000)
+                            }),
+                        )) as ArrayRef,
+                        TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::from_iter(
+                            self.documents.iter().map(|doc| {
+                                doc.get_datetime(field.name())
+                                    .ok()
+                                    .map(|v| v.timestamp_millis())
+                            }),
+                        )),
+                        TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::from_iter(
+                            self.documents.iter().map(|doc| {
+                                doc.get_datetime(field.name())
+                                    .ok()
+                                    .map(|v| v.timestamp_millis() * 1000)
+                            }),
+                        )),
+                        TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from_iter(
+                            self.documents.iter().map(|doc| {
+                                doc.get_datetime(field.name())
+                                    .ok()
+                                    .map(|v| v.timestamp_millis() * 1000_000)
+                            }),
+                        )),
                     };
-                    for v in 0..docs_len {
-                        let doc: &_ = docs.get(v).unwrap();
-                        match doc.get_datetime(field.name()) {
-                            Ok(val) => field_builder.append_value(val.timestamp_millis()).unwrap(),
-                            Err(_) => field_builder.append_null().unwrap(),
-                        };
-                    }
+                    arrays.push(array)
                 }
                 DataType::Float64 => {
-                    let field_builder = builder.field_builder::<Float64Builder>(i).unwrap();
-                    for v in 0..docs_len {
-                        let doc: &_ = docs.get(v).unwrap();
-                        match doc.get_f64(field.name()) {
-                            Ok(val) => field_builder.append_value(val).unwrap(),
-                            Err(_) => field_builder.append_null().unwrap(),
-                        };
-                    }
+                    let array = Float64Array::from_iter(
+                        self.documents
+                            .iter()
+                            .map(|doc| doc.get_f64(field.name()).ok()),
+                    );
+                    arrays.push(Arc::new(array) as ArrayRef);
                 }
                 DataType::Int32 => {
-                    let field_builder = builder.field_builder::<Int32Builder>(i).unwrap();
-                    for v in 0..docs_len {
-                        let doc: &_ = docs.get(v).unwrap();
-                        match doc.get_i32(field.name()) {
-                            Ok(val) => field_builder.append_value(val).unwrap(),
-                            Err(_) => field_builder.append_null().unwrap(),
-                        };
-                    }
+                    let array = Int32Array::from_iter(
+                        self.documents
+                            .iter()
+                            .map(|doc| doc.get_i32(field.name()).ok()),
+                    );
+                    arrays.push(Arc::new(array) as ArrayRef);
                 }
                 DataType::Int64 => {
-                    let field_builder = builder.field_builder::<Int64Builder>(i).unwrap();
-                    for v in 0..docs_len {
-                        let doc: &_ = docs.get(v).unwrap();
-                        match doc.get_i64(field.name()) {
-                            Ok(val) => field_builder.append_value(val).unwrap(),
-                            Err(_) => field_builder.append_null().unwrap(),
-                        };
-                    }
+                    let array = Int64Array::from_iter(
+                        self.documents
+                            .iter()
+                            .map(|doc| doc.get_i64(field.name()).ok()),
+                    );
+                    arrays.push(Arc::new(array) as ArrayRef);
                 }
                 DataType::Utf8 => {
-                    let field_builder = builder.field_builder::<StringBuilder>(i).unwrap();
-                    for v in 0..docs_len {
-                        let doc: &_ = docs.get(v).unwrap();
-                        match doc.get(field.name()) {
-                            Some(Bson::ObjectId(oid)) => {
-                                field_builder.append_value(oid.to_hex().as_str()).unwrap()
-                            }
-                            Some(Bson::String(val)) => field_builder.append_value(&val).unwrap(),
-                            Some(Bson::Null) => field_builder.append_null().unwrap(),
-                            Some(t) => panic!(
-                                "Option to cast non-string types to string not yet implemented for {:?}", t
-                            ),
-                            None => field_builder.append_null().unwrap(),
-                        };
-                    }
+                    let array = StringArray::from_iter(
+                        self.documents
+                            .iter()
+                            .map(|doc| doc.get_str(field.name()).ok()),
+                    );
+                    arrays.push(Arc::new(array) as ArrayRef);
+                }
+                DataType::LargeUtf8 => {
+                    let array = LargeStringArray::from_iter(
+                        self.documents
+                            .iter()
+                            .map(|doc| doc.get_str(field.name()).ok()),
+                    );
+                    arrays.push(Arc::new(array) as ArrayRef);
                 }
                 DataType::List(_dtype) => panic!("Creating lists not yet implemented"),
                 DataType::Struct(_fields) => panic!("Creating nested structs not yet implemented"),
                 t => panic!("Data type {:?} not supported when reading from MongoDB", t),
             }
         }
-        // append true to all struct records
-        for _ in 0..docs_len {
-            builder.append(true).unwrap();
+
+        Ok(Some(RecordBatch::try_new(self.schema(), arrays)?))
+    }
+
+    /// Return the reader as a recordbatch stream
+    pub async fn to_stream(mut self) -> impl Stream<Item = RecordBatch> + Send {
+        stream! {
+            while let Ok(Some(batch)) = self.next_batch().await {
+                yield batch
+            }
         }
-        Ok(Some(RecordBatch::from(&builder.finish())))
     }
 }
 
