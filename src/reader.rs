@@ -1,11 +1,19 @@
 use std::time::Duration;
 
-use arrow::{array::*, datatypes::{DataType, SchemaRef, TimeUnit}, error::{ArrowError, Result}, record_batch::{RecordBatch, RecordBatchReader}};
-use bson::{Bson, Document, doc};
-use mongodb::options::{AggregateOptions, ClientOptions, StreamAddress};
-use mongodb::sync::Client;
+use arrow::{
+    array::*,
+    datatypes::{DataType, SchemaRef, TimeUnit},
+    error::{ArrowError, Result},
+    record_batch::RecordBatch,
+};
+use bson::{doc, Bson, Document};
+use futures_util::stream::StreamExt;
+use mongodb::{
+    options::{AggregateOptions, ClientOptions, ServerAddress},
+    Client,
+};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 /// Configuration for the MongoDB reader
 pub struct ReaderConfig {
     /// The hostname to connect to
@@ -16,6 +24,10 @@ pub struct ReaderConfig {
     pub database: String,
     /// The name of the collection to read from
     pub collection: String,
+    /// Credentials as a struct of key and value
+    pub credential: Option<(String, String)>,
+    /// Authentication DB if credentials are set
+    pub auth_db: Option<String>,
 }
 
 /// Database reader
@@ -38,17 +50,17 @@ pub struct Reader {
     ///   less roundtrips to the database.
     batch_size: usize,
     /// The remaining limit of documents to get after getting each batch
-    remaining_limit: usize
+    remaining_limit: usize,
 }
 
 impl Reader {
     /// Try to create a new reader
     pub fn try_new(
-        config: &ReaderConfig, 
-        schema: SchemaRef, 
+        config: &ReaderConfig,
+        schema: SchemaRef,
         filters: Vec<Document>,
         limit: Option<usize>,
-        skip: Option<usize>
+        skip: Option<usize>,
     ) -> Result<Self> {
         let client = get_client(config)?;
         Ok(Self {
@@ -75,15 +87,19 @@ impl Reader {
     /// Try to estimate the number of rows, to enable partitioning.
     ///
     /// Should time out after a short period to avoid spending too much time.
-    pub fn estimate_records(config: &ReaderConfig, filters: Vec<Document>, max_time_ms: Option<u64>) -> Result<Option<usize>> {
+    pub async fn estimate_records(
+        config: &ReaderConfig,
+        filters: Vec<Document>,
+        max_time_ms: Option<u64>,
+    ) -> Result<Option<usize>> {
         let client = get_client(config)?;
 
         let coll = client
             .database(config.database.as_ref())
-            .collection(config.collection.as_ref());
+            .collection::<Document>(config.collection.as_ref());
 
         let aggregate_options = AggregateOptions::builder()
-        .max_time(Duration::from_millis(max_time_ms.unwrap_or(10000)))
+            .max_time(Duration::from_millis(max_time_ms.unwrap_or(10000)))
             .build();
 
         let mut matches = filters;
@@ -94,18 +110,14 @@ impl Reader {
             }
         } });
 
-        let cursor = coll
-            .aggregate(
-                matches,
-                Some(aggregate_options),
-            );
+        let cursor = coll.aggregate(matches, Some(aggregate_options)).await;
         if cursor.is_err() {
             return Ok(None);
         }
 
         let mut cursor = cursor.unwrap();
 
-        let record = cursor.next().unwrap().unwrap();
+        let record = cursor.next().await.unwrap().unwrap();
         dbg!(&record);
         let count = record.get_i32("count").unwrap();
         Ok(Some(count as usize))
@@ -117,7 +129,7 @@ impl Reader {
     }
 
     /// Read the next record batch
-    pub fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
+    pub async fn next_batch(&mut self) -> Result<Option<RecordBatch>> {
         let mut criteria = doc! {};
         let mut project = doc! {};
         let mut matches = vec![];
@@ -133,7 +145,7 @@ impl Reader {
         let coll = self
             .client
             .database(self.database.as_ref())
-            .collection(self.collection.as_ref());
+            .collection::<Document>(self.collection.as_ref());
 
         let aggregate_options = AggregateOptions::builder()
             .batch_size(Some(self.batch_size as u32))
@@ -144,7 +156,7 @@ impl Reader {
         matches.push(doc! {"$skip": self.current_index as i32});
         let limit = self.batch_size.min(self.remaining_limit);
         if limit == 0 {
-            return Ok(None)
+            return Ok(None);
         }
         matches.push(doc! {"$limit": limit as i32});
         self.current_index += self.batch_size;
@@ -153,16 +165,14 @@ impl Reader {
         dbg!(&matches);
 
         let mut cursor = coll
-            .aggregate(
-                matches,
-                Some(aggregate_options),
-            )
+            .aggregate(matches, Some(aggregate_options))
+            .await
             .expect("Unable to run aggregation");
 
         // collect results from cursor into batches
         let mut docs = vec![];
         for _ in 0..self.batch_size {
-            if let Some(Ok(doc)) = cursor.next() {
+            if let Some(Ok(doc)) = cursor.next().await {
                 docs.push(doc);
             } else {
                 break;
@@ -268,37 +278,12 @@ impl Reader {
 
 fn get_client(config: &ReaderConfig) -> Result<Client> {
     let options = ClientOptions::builder()
-        .hosts(vec![StreamAddress {
-            hostname: config.hostname.to_string(),
+        .hosts(vec![ServerAddress::Tcp {
+            host: config.hostname.to_string(),
             port: config.port,
         }])
         .build();
-    Client::with_options(options).map_err(|e| {
-        ArrowError::ExternalError(Box::new(e))
-    })
-}
-
-impl Iterator for Reader {
-    type Item = arrow::error::Result<RecordBatch>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.next_batch()
-            .map_err(|_| {
-                arrow::error::ArrowError::IoError("Error reading from MongoDB".to_string())
-            })
-            .transpose()
-    }
-}
-
-impl RecordBatchReader for Reader {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-    fn next_batch(&mut self) -> arrow::error::Result<Option<RecordBatch>> {
-        self.next_batch().map_err(|_| {
-            arrow::error::ArrowError::IoError("Unable to read next batch from MongoDB".to_string())
-        })
-    }
+    Client::with_options(options).map_err(|e| ArrowError::ExternalError(Box::new(e)))
 }
 
 #[cfg(test)]
@@ -311,8 +296,8 @@ mod tests {
     use arrow::csv;
     use arrow::datatypes::{Field, Schema};
 
-    #[test]
-    fn test_read_collection() -> Result<()> {
+    #[tokio::test]
+    async fn test_read_collection() -> Result<()> {
         let fields = vec![
             Field::new("_id", DataType::Utf8, false),
             Field::new("trip_id", DataType::Utf8, false),
@@ -339,13 +324,15 @@ mod tests {
             port: None,
             database: "mycollection".to_string(),
             collection: "delays_".to_string(),
+            credential: Some(("user".to_string(), "pass".to_string())),
+            auth_db: Some("admin".to_string()),
         };
         let mut reader = Reader::try_new(&config, Arc::new(schema), vec![], None, None)?;
 
         // write results to CSV as the schema would allow
         let file = File::create("./target/debug/delays.csv").unwrap();
         let mut writer = csv::Writer::new(file);
-        while let Ok(Some(batch)) = reader.next_batch() {
+        while let Ok(Some(batch)) = reader.next_batch().await {
             writer.write(&batch).unwrap();
         }
         Ok(())

@@ -5,23 +5,28 @@ use arrow::{
     error::{ArrowError, Result},
     record_batch::RecordBatch,
 };
-use bson::doc;
-use chrono::{DateTime, NaiveDateTime, Utc};
-use mongodb::options::{ClientOptions, StreamAddress};
-use mongodb::sync::Client;
+use bson::{doc, Document};
+use mongodb::{
+    options::{ClientOptions, ServerAddress},
+    Client,
+};
 
 use crate::utils::mongo_to_arrow_error;
 
 /// Configuration for the MongoDB writer
-pub struct WriterConfig<'a> {
+pub struct WriterConfig {
     /// The hostname to connect to
-    pub hostname: &'a str,
+    pub hostname: String,
     /// An optional port, defaults to 27017
     pub port: Option<u16>,
     /// The name of the database to write to
-    pub database: &'a str,
+    pub database: String,
     /// The name of the collection to write to
-    pub collection: &'a str,
+    pub collection: String,
+    /// Credentials as a struct of key and value
+    pub credential: Option<(String, String)>,
+    /// Authentication DB if credentials are set
+    pub auth_db: Option<String>,
     /// The write mode, whether an existing collection should
     ///  be appended to or overwritten
     pub write_mode: WriteMode,
@@ -55,12 +60,12 @@ pub struct Writer {
 
 impl Writer {
     /// Try to create a new writer, with provided writer options and a schema
-    pub fn try_new(config: &WriterConfig, schema: Schema) -> Result<Self> {
+    pub async fn try_new(config: WriterConfig, schema: Schema) -> Result<Self> {
         // check if data types can be written
         Writer::check_supported_schema(schema.fields(), config.coerce_types)?;
         let options = ClientOptions::builder()
-            .hosts(vec![StreamAddress {
-                hostname: config.hostname.to_string(),
+            .hosts(vec![ServerAddress::Tcp {
+                host: config.hostname.to_string(),
                 port: config.port,
             }])
             .build();
@@ -69,9 +74,10 @@ impl Writer {
         if let WriteMode::Overwrite = config.write_mode {
             // we ignore the result here as dropping a non-existent collection returns an error
             let drop = client
-                .database(config.database)
-                .collection(config.collection)
-                .drop(None);
+                .database(&config.database)
+                .collection::<Document>(&config.collection)
+                .drop(None)
+                .await;
             if drop.is_err() {
                 println!("Collection does not exist, and was not dropped");
             }
@@ -86,7 +92,7 @@ impl Writer {
     }
 
     /// Write a batch to the database
-    pub fn write(&self, batch: &RecordBatch) -> Result<()> {
+    pub async fn write(&self, batch: &RecordBatch) -> Result<()> {
         if batch.schema().as_ref() != &self.schema {
             return Err(ArrowError::SchemaError(
                 "Schema of record batch does not match writer".to_string(),
@@ -100,6 +106,7 @@ impl Writer {
             .collection(self.collection.as_str());
 
         coll.insert_many(documents.0, None)
+            .await
             .map(|_| {})
             .map_err(mongo_to_arrow_error)
     }
@@ -282,10 +289,7 @@ impl From<&RecordBatch> for Documents {
                             let value = array.value(i);
                             documents[i].insert(
                                 field.name(),
-                                bson::Bson::DateTime(DateTime::<Utc>::from_utc(
-                                    NaiveDateTime::from_timestamp(value / 1000, 0),
-                                    Utc,
-                                )),
+                                bson::Bson::DateTime(bson::DateTime::from_millis(value)),
                             );
                         }
                     }
@@ -330,8 +334,8 @@ mod tests {
 
     use crate::reader::*;
 
-    #[test]
-    fn test_write_collection() -> Result<()> {
+    #[tokio::test]
+    async fn test_write_collection() -> Result<()> {
         let fields = vec![
             Field::new("_id", DataType::Utf8, false),
             Field::new("trip_id", DataType::Utf8, false),
@@ -358,21 +362,26 @@ mod tests {
             port: None,
             database: "mycollection".to_string(),
             collection: "delays_".to_string(),
+            credential: Some(("user".to_string(), "pass".to_string())),
+            auth_db: Some("admin".to_string()),
         };
-        let mut reader = Reader::try_new(&reader_config, Arc::new(schema.clone()), vec![], None, None)?;
+        let mut reader =
+            Reader::try_new(&reader_config, Arc::new(schema.clone()), vec![], None, None)?;
         let writer_config = WriterConfig {
-            hostname: "localhost",
+            hostname: "localhost".to_string(),
             port: None,
-            database: "mycollection",
-            collection: "delays_2",
+            database: "mycollection".to_string(),
+            collection: "delays_2".to_string(),
+            credential: Some(("user".to_string(), "pass".to_string())),
+            auth_db: Some("admin".to_string()),
             write_mode: WriteMode::Overwrite,
             coerce_types: true,
         };
-        let writer = Writer::try_new(&writer_config, schema)?;
+        let writer = Writer::try_new(writer_config, schema).await?;
 
         // read from a collection and write to another
-        while let Ok(Some(batch)) = reader.next_batch() {
-            writer.write(&batch)?
+        while let Ok(Some(batch)) = reader.next_batch().await {
+            writer.write(&batch).await?
         }
         Ok(())
     }
