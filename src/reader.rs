@@ -8,7 +8,7 @@ use arrow::{
     record_batch::RecordBatch,
 };
 use async_stream::stream;
-use bson::{doc, Bson, Document};
+use bson::{doc, Document};
 use futures_util::stream::{Stream, StreamExt};
 use mongodb::{
     options::{AggregateOptions, ClientOptions, ServerAddress},
@@ -234,7 +234,7 @@ impl Reader {
                             self.documents.iter().map(|doc| {
                                 doc.get_datetime(field.name())
                                     .ok()
-                                    .map(|v| v.timestamp_millis() * 1000_000)
+                                    .map(|v| v.timestamp_millis() * 1_000_000)
                             }),
                         )),
                     };
