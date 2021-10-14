@@ -122,10 +122,15 @@ impl Reader {
 
         let mut cursor = cursor.unwrap();
 
-        let record = cursor.next().await.unwrap().unwrap();
-        dbg!(&record);
-        let count = record.get_i32("count").unwrap();
-        Ok(Some(count as usize))
+        let record = cursor.next().await;
+        match record {
+            Some(result) => {
+                let document = result.unwrap();
+                let count = document.get_i32("count").unwrap();
+                Ok(Some(count as usize))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Get reader schema
