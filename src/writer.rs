@@ -190,6 +190,12 @@ impl Writer {
                         t
                     )));
                 }
+                DataType::Map(_, _) => {
+                    return Err(ArrowError::InvalidArgumentError(format!(
+                        "Data type {:?} not supported",
+                        t
+                    )));
+                }
             }
         }
         Ok(())
