@@ -172,7 +172,7 @@ impl Writer {
                         t
                     )));
                 }
-                DataType::Union(_) => {
+                DataType::Union(_, _) => {
                     return Err(ArrowError::InvalidArgumentError(format!(
                         "Data type {:?} not supported",
                         t
